@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"time"
+	"strings"
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
@@ -31,12 +32,14 @@ const DEFAULT_CULL_IDLE_TIME = "1440" // One day
 const DEFAULT_IDLENESS_CHECK_PERIOD = "1"
 const DEFAULT_ENABLE_CULLING = "false"
 const DEFAULT_CLUSTER_DOMAIN = "cluster.local"
+const DEFAULT_CULL_OPTION = "KERNEL"
 const DEFAULT_DEV = "false"
 
 var CULL_IDLE_TIME = 0
 var ENABLE_CULLING = false
 var IDLENESS_CHECK_PERIOD = 0
 var CLUSTER_DOMAIN = ""
+var CULL_OPTION = ""
 var DEV = false
 
 // When a Resource should be stopped/culled, then the controller should add this
@@ -65,6 +68,18 @@ type KernelStatus struct {
 	LastActivity   string `json:"last_activity"`
 	ExecutionState string `json:"execution_state"`
 	Connections    int    `json:"connections"`
+}
+
+type TerminalStatus struct {
+	Name           string `json:"name"`
+	LastActivity   string `json:"last_activity"`
+}
+
+type ConnStatus struct {
+	Connections    int    `json:"connections"`
+	Kernels        int    `json:"kernels"`
+	LastActivity   string `json:"last_activity"`
+	Started        string `json:"started"`
 }
 
 // CullingReconciler : Type of a reconciler that will be culling idle notebooks
@@ -240,6 +255,88 @@ func getNotebookApiKernels(nm, ns string, log logr.Logger) []KernelStatus {
 	return kernels
 }
 
+func getNotebookApiTerminals(nm, ns string, log logr.Logger) []TerminalStatus {
+	// Get the Terminals' status from the Server's `/api/terminals` endpoint
+	client := &http.Client{
+		Timeout: time.Second * 10,
+	}
+
+	domain := GetEnvDefault("CLUSTER_DOMAIN", DEFAULT_CLUSTER_DOMAIN)
+	url := fmt.Sprintf(
+		"http://%s.%s.svc.%s/notebook/%s/%s/api/terminals",
+		nm, ns, domain, ns, nm)
+	if GetEnvDefault("DEV", DEFAULT_DEV) != "false" {
+		url = fmt.Sprintf(
+			"http://localhost:8001/api/v1/namespaces/%s/services/%s:http-%s/proxy/notebook/%s/%s/api/terminals",
+			ns, nm, nm, ns, nm)
+	}
+
+	resp, err := client.Get(url)
+	if err != nil {
+		log.Error(err, fmt.Sprintf("Error talking to %s", url))
+		return nil
+	}
+
+	// Decode the body
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		log.Info(fmt.Sprintf(
+			"Warning: GET to %s: %d", url, resp.StatusCode))
+		return nil
+	}
+
+	var terminals []TerminalStatus
+
+	err = json.NewDecoder(resp.Body).Decode(&terminals)
+	if err != nil {
+		log.Error(err, "Error parsing JSON response for Notebook API Terminals.")
+		return nil
+	}
+
+	return terminals
+}
+
+func getNotebookApiConnStatus(nm, ns string, log logr.Logger) ConnStatus {
+	// Get the Terminals' status from the Server's `/api/terminals` endpoint
+	client := &http.Client{
+		Timeout: time.Second * 10,
+	}
+
+	domain := GetEnvDefault("CLUSTER_DOMAIN", DEFAULT_CLUSTER_DOMAIN)
+	url := fmt.Sprintf(
+		"http://%s.%s.svc.%s/notebook/%s/%s/api/status",
+		nm, ns, domain, ns, nm)
+	if GetEnvDefault("DEV", DEFAULT_DEV) != "false" {
+		url = fmt.Sprintf(
+			"http://localhost:8001/api/v1/namespaces/%s/services/%s:http-%s/proxy/notebook/%s/%s/api/status",
+			ns, nm, nm, ns, nm)
+	}
+
+	resp, err := client.Get(url)
+	if err != nil {
+		log.Error(err, fmt.Sprintf("Error talking to %s", url))
+		return nil
+	}
+
+	// Decode the body
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		log.Info(fmt.Sprintf(
+			"Warning: GET to %s: %d", url, resp.StatusCode))
+		return nil
+	}
+
+	var connStatus ConnStatus
+
+	err = json.NewDecoder(resp.Body).Decode(&connStatus)
+	if err != nil {
+		log.Error(err, "Error parsing JSON response for Notebook API Terminals.")
+		return nil
+	}
+
+	return connStatus
+}
+
 func allKernelsAreIdle(kernels []KernelStatus, log logr.Logger) bool {
 	// Iterate on the list of kernels' status.
 	// If all kernels are on execution_state=idle then this function returns true.
@@ -258,17 +355,72 @@ func allKernelsAreIdle(kernels []KernelStatus, log logr.Logger) bool {
 func updateNotebookLastActivityAnnotation(meta *metav1.ObjectMeta, log logr.Logger) {
 
 	log.Info("Updating the last-activity annotation. Checking /api/kernels")
-	nm, ns := meta.GetName(), meta.GetNamespace()
-	kernels := getNotebookApiKernels(nm, ns, log)
-	if kernels == nil {
-		log.Info("Could not GET the kernels status. Will not update last-activity.")
-		return
-	} else if len(kernels) == 0 {
-		log.Info("Notebook has no kernels. Will not update last-activity")
-		return
-	}
 
-	updateTimestampFromKernelsActivity(meta, kernels, log)
+	nm, ns := meta.GetName(), meta.GetNamespace()
+
+	// Order is important here. We want to check the connStatus first, 
+	// because checking kernels & terminals would update the connStatus.
+	connStatus := getNotebookApiConnStatus(nm, ns, log)
+	kernels := getNotebookApiKernels(nm, ns, log)
+	terminals := getNotebookApiTerminals(nm, ns, log)
+
+	if "kernel" == CULL_OPTION {
+		if kernels == nil {
+			log.Info("Could not GET the api/kernels status. Will not update last-activity.")
+			return
+		} else if len(kernels) == 0 {
+			log.Info("Notebook has no kernels. Will not update last-activity")
+			return
+		}
+		updateTimestampFromKernelsActivity(meta, kernels, log)
+		return
+	} else if "terminal" == CULL_OPTION {
+		if terminals == nil {
+			log.Info("Could not GET the api/terminals status. Will not update last-activity.")
+			return
+		} else if len(terminals) == 0 {
+			log.Info("Notebook has no terminals. Will not update last-activity")
+			return
+		}
+		updateTimestampFromTerminalsActivity(meta, terminals, log)
+		return
+	} else if "both" == CULL_OPTION {
+		if kernels == nil {
+			log.Info("Could not GET the api/kernels status. Will not update last-activity.")
+			return
+		}
+		if terminals == nil {
+			log.Info("Could not GET the api/terminals status. Will not update last-activity.")
+			return
+		}
+		if len(kernels) == 0 && len(terminals) == 0 {
+			log.Info("Notebook has neither kernels nor terminals. Will not update last-activity")
+			return
+		}
+		updateTimestampFromKernelsAndTerminalsActivity(meta, kernels, terminals, log)
+		return
+	} else if "network" == CULL_OPTION {
+		if connStatus == nil {
+			log.Info("Could not GET the api/status. Will not update last-activity.")
+			return
+		}
+		updateTimestampFromNetworkActivity(meta, connStatus, log)
+	} else if "network+" == CULL_OPTION {
+		if connStatus == nil {
+			log.Info("Could not GET the api/status. Will not update last-activity.")
+			return
+		}
+		if kernels == nil {
+			log.Info("Could not GET the api/kernels status. Will not update last-activity.")
+			return
+		}
+		updateTimestampFromNetworkAndKernelsActivity(meta, kernels, connStatus, log)
+		return
+	} else {
+		log.Error("No condition matched, Skipping last-activity update...")
+	}
+	
+	return
 }
 
 func updateTimestampFromKernelsActivity(meta *metav1.ObjectMeta, kernels []KernelStatus, log logr.Logger) {
@@ -305,6 +457,119 @@ func updateTimestampFromKernelsActivity(meta *metav1.ObjectMeta, kernels []Kerne
 
 	meta.Annotations[LAST_ACTIVITY_ANNOTATION] = t
 	log.Info(fmt.Sprintf("Successfully updated last-activity from latest kernel action, %s", t))
+}
+
+func updateTimestampFromTerminalsActivity(meta *metav1.ObjectMeta, terminals []TerminalStatus, log logr.Logger) {
+	// Checking the LAST_ACTIVITY_ANNOTATION
+	// should be the most recent terminal last-activity among the terminals.
+	recentTime, err := time.Parse(time.RFC3339, terminals[0].LastActivity)
+	if err != nil {
+		log.Error(err, "Error parsing the last-activity from the /api/terminals")
+		return
+	}
+
+	for i := 1; i < len(terminals); i++ {
+		terminalLastActivity, err := time.Parse(time.RFC3339, terminals[i].LastActivity)
+		if err != nil {
+			log.Error(err, "Error parsing the last-activity from the /api/terminals")
+			return
+		}
+		if terminalLastActivity.After(recentTime) {
+			recentTime = kernelLastActivity
+		}
+	}
+	t := recentTime.Format(time.RFC3339)
+
+	meta.Annotations[LAST_ACTIVITY_ANNOTATION] = t
+	log.Info(fmt.Sprintf("Successfully updated last-activity from latest terminal action, %s", t))
+}
+
+func updateTimestampFromKernelsAndTerminalsActivity(meta *metav1.ObjectMeta, kernels []KernelStatus, terminals []TerminalStatus, log logr.Logger) {
+	// Checking the LAST_ACTIVITY_ANNOTATION
+	// should be the most recent last-activity among the terminals and kernels.
+	
+	recentTimeKernel, err := time.Parse(time.RFC3339, kernels[0].LastActivity)
+	if err != nil {
+		log.Error(err, "Error parsing the last-activity from the /api/kernels")
+		return
+	}
+
+	recentTimeTerminal, err := time.Parse(time.RFC3339, terminals[0].LastActivity)
+	if err != nil {
+		log.Error(err, "Error parsing the last-activity from the /api/terminals")
+		return
+	}
+	
+	for i := 1; i < len(kernels); i++ {
+		kernelLastActivity, err := time.Parse(time.RFC3339, kernels[i].LastActivity)
+		if err != nil {
+			log.Error(err, "Error parsing the last-activity from the /api/kernels")
+			return
+		}
+		if kernelLastActivity.After(recentTimeKernel) {
+			recentTimeKernel = kernelLastActivity
+		}
+	}
+
+	for i := 1; i < len(terminals); i++ {
+		terminalLastActivity, err := time.Parse(time.RFC3339, terminals[i].LastActivity)
+		if err != nil {
+			log.Error(err, "Error parsing the last-activity from the /api/terminals")
+			return
+		}
+		if terminalLastActivity.After(recentTimeTerminal) {
+			recentTimeTerminal = terminalLastActivity
+		}
+	}
+
+	if recentTimeKernel.After(recentTimeTerminal) {
+		t := recentTimeKernel.Format(time.RFC3339)
+	} else {
+		t := recentTimeTerminal.Format(time.RFC3339)
+	}
+
+	meta.Annotations[LAST_ACTIVITY_ANNOTATION] = t
+	log.Info(fmt.Sprintf("Successfully updated last-activity from latest terminal action, %s", t))
+}
+
+func updateTimestampFromNetworkActivity(meta *metav1.ObjectMeta, connStatus ConnStatus, log logr.Logger) {
+
+	recentTime, err := time.Parse(time.RFC3339, connStatus.LastActivity)
+	if err != nil {
+		log.Error(err, "Error parsing the last-activity from the /api/status")
+		return
+	}
+
+	t := recentTime.Format(time.RFC3339)
+
+	meta.Annotations[LAST_ACTIVITY_ANNOTATION] = t
+	log.Info(fmt.Sprintf("Successfully updated last-activity from latest kernel action, %s", t))
+}
+
+func updateTimestampFromNetworkAndKernelsActivity(meta *metav1.ObjectMeta, kernels []KernelStatus, connStatus ConnStatus, log logr.Logger) {
+
+	if len(kernels) == 0 {
+		log.Info("Notebook has no kernels, proceed to network activity check")
+	} else if !allKernelsAreIdle(kernels, log) {
+		// At least on kernel is "busy" so the last-activity annotation should
+		// should be the current time.
+		t := createTimestamp()
+		log.Info(fmt.Sprintf("Found a busy kernel. Updating the last-activity to %s", t))
+
+		meta.Annotations[LAST_ACTIVITY_ANNOTATION] = t
+		return
+	}
+
+	recentTime, err := time.Parse(time.RFC3339, connStatus.LastActivity)
+	if err != nil {
+		log.Error(err, "Error parsing the last-activity from the /api/status")
+		return
+	}
+	
+	t := recentTime.Format(time.RFC3339)
+
+	meta.Annotations[LAST_ACTIVITY_ANNOTATION] = t
+	log.Info(fmt.Sprintf("Successfully updated last-activity from latest network action, %s", t))
 }
 
 func updateLastCullingCheckTimestampAnnotation(meta *metav1.ObjectMeta, log logr.Logger) {
@@ -423,6 +688,19 @@ func initGlobalVars() error {
 	enableCulling := GetEnvDefault("ENABLE_CULLING", DEFAULT_ENABLE_CULLING)
 	if enableCulling == "true" {
 		ENABLE_CULLING = true
+	}
+
+	cullingOption := strings.ToLower(GetEnvDefault("CULL_OPTION", DEFAULT_CULL_OPTION))
+	if "kernel" == cullingOption {
+		CULL_OPTION = "kernel"
+	} else if "terminal" == cullingOption {
+		CULL_OPTION = "terminal"
+	} else if "both" == cullingOption {
+		CULL_OPTION = "both"
+	} else if "network" == cullingOption {
+		CULL_OPTION = "network"
+	} else {
+		CULL_OPTION = DEFAULT_CULL_OPTION
 	}
 
 	CLUSTER_DOMAIN = GetEnvDefault("CLUSTER_DOMAIN", DEFAULT_CLUSTER_DOMAIN)

@@ -85,6 +85,7 @@ run-culling: generate fmt vet manifests
 	CULL_IDLE_TIME=10 \
 	IDLENESS_CHECK_PERIOD=1 \
 	DEV=true \
+	CULL_OPTION=BOTH\
 	go run ./main.go
 
 ##@ Build
