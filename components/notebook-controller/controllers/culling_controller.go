@@ -700,7 +700,7 @@ func initGlobalVars() error {
 	} else if "network" == cullingOption {
 		CULL_OPTION = "network"
 	} else if "network+" == cullingOption {
-		CULL_OPTION = "network"
+		CULL_OPTION = "network+"
 	} else {
 		CULL_OPTION = DEFAULT_CULL_OPTION
 	}
