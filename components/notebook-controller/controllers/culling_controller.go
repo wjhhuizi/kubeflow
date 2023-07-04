@@ -315,7 +315,7 @@ func getNotebookApiConnStatus(nm, ns string, log logr.Logger) ConnStatus {
 	resp, err := client.Get(url)
 	if err != nil {
 		log.Error(err, fmt.Sprintf("Error talking to %s", url))
-		return nil
+		ConnStatus{}
 	}
 
 	// Decode the body
@@ -323,7 +323,7 @@ func getNotebookApiConnStatus(nm, ns string, log logr.Logger) ConnStatus {
 	if resp.StatusCode != 200 {
 		log.Info(fmt.Sprintf(
 			"Warning: GET to %s: %d", url, resp.StatusCode))
-		return nil
+			ConnStatus{}
 	}
 
 	var connStatus ConnStatus
@@ -331,7 +331,7 @@ func getNotebookApiConnStatus(nm, ns string, log logr.Logger) ConnStatus {
 	err = json.NewDecoder(resp.Body).Decode(&connStatus)
 	if err != nil {
 		log.Error(err, "Error parsing JSON response for Notebook API Terminals.")
-		return nil
+		return ConnStatus{}
 	}
 
 	return connStatus
@@ -400,13 +400,13 @@ func updateNotebookLastActivityAnnotation(meta *metav1.ObjectMeta, log logr.Logg
 		updateTimestampFromKernelsAndTerminalsActivity(meta, kernels, terminals, log)
 		return
 	} else if "network" == CULL_OPTION {
-		if connStatus == nil {
+		if connStatus == ConnStatus{} {
 			log.Info("Could not GET the api/status. Will not update last-activity.")
 			return
 		}
 		updateTimestampFromNetworkActivity(meta, connStatus, log)
 	} else if "network+" == CULL_OPTION {
-		if connStatus == nil {
+		if connStatus == ConnStatus{} {
 			log.Info("Could not GET the api/status. Will not update last-activity.")
 			return
 		}
@@ -417,7 +417,7 @@ func updateNotebookLastActivityAnnotation(meta *metav1.ObjectMeta, log logr.Logg
 		updateTimestampFromNetworkAndKernelsActivity(meta, kernels, connStatus, log)
 		return
 	} else {
-		log.Error("No condition matched, Skipping last-activity update...")
+		log.Info("Warning: No condition matched, Skipping last-activity update...")
 	}
 	
 	return
@@ -522,10 +522,11 @@ func updateTimestampFromKernelsAndTerminalsActivity(meta *metav1.ObjectMeta, ker
 		}
 	}
 
+	var t string
 	if recentTimeKernel.After(recentTimeTerminal) {
-		t := recentTimeKernel.Format(time.RFC3339)
+		t = recentTimeKernel.Format(time.RFC3339)
 	} else {
-		t := recentTimeTerminal.Format(time.RFC3339)
+		t = recentTimeTerminal.Format(time.RFC3339)
 	}
 
 	meta.Annotations[LAST_ACTIVITY_ANNOTATION] = t
