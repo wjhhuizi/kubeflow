@@ -315,7 +315,7 @@ func getNotebookApiConnStatus(nm, ns string, log logr.Logger) ConnStatus {
 	resp, err := client.Get(url)
 	if err != nil {
 		log.Error(err, fmt.Sprintf("Error talking to %s", url))
-		ConnStatus{}
+		return (ConnStatus{})
 	}
 
 	// Decode the body
@@ -323,7 +323,7 @@ func getNotebookApiConnStatus(nm, ns string, log logr.Logger) ConnStatus {
 	if resp.StatusCode != 200 {
 		log.Info(fmt.Sprintf(
 			"Warning: GET to %s: %d", url, resp.StatusCode))
-			ConnStatus{}
+			return (ConnStatus{})
 	}
 
 	var connStatus ConnStatus
@@ -331,7 +331,7 @@ func getNotebookApiConnStatus(nm, ns string, log logr.Logger) ConnStatus {
 	err = json.NewDecoder(resp.Body).Decode(&connStatus)
 	if err != nil {
 		log.Error(err, "Error parsing JSON response for Notebook API Terminals.")
-		return ConnStatus{}
+		return (ConnStatus{})
 	}
 
 	return connStatus
@@ -400,13 +400,13 @@ func updateNotebookLastActivityAnnotation(meta *metav1.ObjectMeta, log logr.Logg
 		updateTimestampFromKernelsAndTerminalsActivity(meta, kernels, terminals, log)
 		return
 	} else if "network" == CULL_OPTION {
-		if connStatus == ConnStatus{} {
+		if connStatus == (ConnStatus{}) {
 			log.Info("Could not GET the api/status. Will not update last-activity.")
 			return
 		}
 		updateTimestampFromNetworkActivity(meta, connStatus, log)
 	} else if "network+" == CULL_OPTION {
-		if connStatus == ConnStatus{} {
+		if connStatus == (ConnStatus{}) {
 			log.Info("Could not GET the api/status. Will not update last-activity.")
 			return
 		}
@@ -475,7 +475,7 @@ func updateTimestampFromTerminalsActivity(meta *metav1.ObjectMeta, terminals []T
 			return
 		}
 		if terminalLastActivity.After(recentTime) {
-			recentTime = kernelLastActivity
+			recentTime = terminalLastActivity
 		}
 	}
 	t := recentTime.Format(time.RFC3339)
