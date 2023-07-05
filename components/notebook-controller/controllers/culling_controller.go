@@ -488,16 +488,23 @@ func updateTimestampFromKernelsAndTerminalsActivity(meta *metav1.ObjectMeta, ker
 	// Checking the LAST_ACTIVITY_ANNOTATION
 	// should be the most recent last-activity among the terminals and kernels.
 	
-	recentTimeKernel, err := time.Parse(time.RFC3339, kernels[0].LastActivity)
-	if err != nil {
-		log.Error(err, "Error parsing the last-activity from the /api/kernels")
-		return
+	var recentTimeKernel, recentTimeTerminal time.Time
+	var err1, err2 error
+
+	if len(kernels) > 0 {
+		recentTimeKernel, err1 = time.Parse(time.RFC3339, kernels[0].LastActivity)
+		if err1 != nil {
+			log.Error(err1, "Error parsing the last-activity from the /api/kernels")
+			return
+		}
 	}
 
-	recentTimeTerminal, err := time.Parse(time.RFC3339, terminals[0].LastActivity)
-	if err != nil {
-		log.Error(err, "Error parsing the last-activity from the /api/terminals")
-		return
+	if len(terminals) > 0 {
+		recentTimeTerminal, err2 = time.Parse(time.RFC3339, terminals[0].LastActivity)
+		if err2 != nil {
+			log.Error(err2, "Error parsing the last-activity from the /api/terminals")
+			return
+		}
 	}
 	
 	for i := 1; i < len(kernels); i++ {
@@ -506,7 +513,7 @@ func updateTimestampFromKernelsAndTerminalsActivity(meta *metav1.ObjectMeta, ker
 			log.Error(err, "Error parsing the last-activity from the /api/kernels")
 			return
 		}
-		if kernelLastActivity.After(recentTimeKernel) {
+		if len(kernels) > 0 && kernelLastActivity.After(recentTimeKernel) {
 			recentTimeKernel = kernelLastActivity
 		}
 	}
@@ -517,7 +524,7 @@ func updateTimestampFromKernelsAndTerminalsActivity(meta *metav1.ObjectMeta, ker
 			log.Error(err, "Error parsing the last-activity from the /api/terminals")
 			return
 		}
-		if terminalLastActivity.After(recentTimeTerminal) {
+		if len(terminals) > 0 && terminalLastActivity.After(recentTimeTerminal) {
 			recentTimeTerminal = terminalLastActivity
 		}
 	}
