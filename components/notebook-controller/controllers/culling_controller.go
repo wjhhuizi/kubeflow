@@ -487,6 +487,16 @@ func updateTimestampFromTerminalsActivity(meta *metav1.ObjectMeta, terminals []T
 func updateTimestampFromKernelsAndTerminalsActivity(meta *metav1.ObjectMeta, kernels []KernelStatus, terminals []TerminalStatus, log logr.Logger) {
 	// Checking the LAST_ACTIVITY_ANNOTATION
 	// should be the most recent last-activity among the terminals and kernels.
+
+	if !allKernelsAreIdle(kernels, log) {
+		// At least on kernel is "busy" so the last-activity annotation should
+		// should be the current time.
+		t := createTimestamp()
+		log.Info(fmt.Sprintf("Found a busy kernel. Updating the last-activity to %s", t))
+
+		meta.Annotations[LAST_ACTIVITY_ANNOTATION] = t
+		return
+	}
 	
 	var recentTimeKernel, recentTimeTerminal time.Time
 	var err1, err2 error
